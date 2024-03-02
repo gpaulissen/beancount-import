@@ -60,6 +60,7 @@ expression like the following to specify the ofx source:
          cache_filename=os.path.join(journal_dir, 'data/ofx_cache.pickle'),
          checknum_numeric=lambda ofx_filename: False,
          check_balance=lambda ofx_filename: False,
+         check_other_keys=lambda ofx_filename: ['total', 'checknum'],
     )
 
 where `journal_dir` refers to the financial/ directory.
@@ -105,6 +106,11 @@ is not important: one balance is okay.
 3) DTEND missing or DTEND is greater than DTASOF.
 Like case 2 but just to be sure we also deduct transactions greater than
 DTASOF.
+
+Check duplicates by looking at fields other than the fitid
+----------------------------------------------------------
+The `check_other_keys` key is optional but can be used to ignore transactions that are a duplicate of another.
+
 
 Specifying individual accounts
 ==============================
@@ -566,6 +572,61 @@ SecurityInfo = NamedTuple('SecurityInfo', [
     ('ticker', Optional[str]),
 ])
 
+# GJP 2024-03-02
+# The key for OFX entries may not only be: (org, broker id, account_id) + date (dttrade/dtposted) + fitid.
+# It can also be: (org, broker id, account_id) + date (dttrade/dtposted) + checknum + total.
+# So the third FullFitid item was 'str' and becomes 'dict' with keys from named tuple RawTransactionEntry.
+# But since a dict is not hashable we need to convert it back to a string (!).
+#
+# The transactions below are the same although the fitid differs (the second is generated from a PDF).
+#
+# Transaction 1:
+#
+# 2024-01-08 * "STMTTRN - EDF - PRLV SEPA EDF clients particulie Numero de client 6022926937 MM9760229269370001"
+#   Assets:FR:BanquePopulaire:Checking:CompteCommun  -235.00 EUR
+#     ofx_fitid: "1306834516"
+#     date: 2024-01-08
+#     ofx_type: "STMTTRN"
+#     ofx_memo: "PRLV SEPA EDF clients particulie Numero de client 6022926937 MM9760229269370001"
+#     ofx_name: "EDF"
+#     check: "0G93JXY"
+#   Expenses:House:Electricity                        235.00 EUR  
+#
+# Transaction 2:
+#
+# 2024-01-08 * "STMTTRN - PRLV SEPA EDF clients pa - Numero de client : 6022926937 - MM9760229269370001"
+#   Assets:FR:BanquePopulaire:Checking:CompteCommun  -235.00 EUR
+#     ofx_fitid: "8b7d955a3f9b158aaa7ee9c679a5baf0b7d7ac3a"
+#     date: 2024-01-08
+#     ofx_type: "STMTTRN"
+#     ofx_memo: "Numero de client : 6022926937 - MM9760229269370001"
+#     ofx_name: "PRLV SEPA EDF clients pa"
+#     check: "0G93JXY"
+#   Expenses:FIXME                                    235.00 EUR
+
+class FullFitid(NamedTuple):
+    account_ofx_id: tuple
+    date: datetime.date
+    key: dict
+
+    def __repr__(self):
+        org = self.account_ofx_id[0]
+        brokerid = self.account_ofx_id[1]
+        accountid = self.account_ofx_id[2]
+        result = ''
+        if org:
+            result += f'org={org}, '
+        if brokerid:
+            result += f'brokerid={brokerid}, '
+        if accountid:
+            result += f'accountid={accountid}, '
+        result += f'date={self.date}, '
+        for k, v in self.key.items():
+            if v is not None:
+                result += f'{k}: {v}, '
+        return result[0:len(result)-2]
+
+
 def get_info(
         raw: Union[RawBalanceEntry, RawTransactionEntry]) -> Dict[str, Any]:
     return dict(
@@ -660,10 +721,14 @@ CHECKNUM_NUMERIC = True   # True is old behavior, not conform OFX
 
 CHECK_BALANCE = False     # False is old behavior
 
+CHECK_OTHER_KEYS = []     # Empty is old behaviour
+
 
 class ParsedOfxStatement(object):
     def __init__(self, seen_fitids, filename, securities_map, org, stmtrs,
-                 checknum_numeric=CHECKNUM_NUMERIC, check_balance=CHECK_BALANCE):
+                 checknum_numeric=CHECKNUM_NUMERIC,
+                 check_balance=CHECK_BALANCE,
+                 check_other_keys=CHECK_OTHER_KEYS):
         logger.debug(">ParsedOfxStatement.__init__(filename=%s)" % (filename))
         filename = os.path.abspath(filename)
         self.filename = filename
@@ -718,16 +783,16 @@ class ParsedOfxStatement(object):
                 # We include the date along with the FITID because some financial institutions fail
                 # to produce truly unique FITID values.  For example, National Financial Services
                 # (Fidelity) sometimes produces duplicates when the amount is the same.
-                full_fitid = (account_ofx_id, date, fitid)
+                full_fitid = str(FullFitid(account_ofx_id, date, {'fitid': fitid}))
                 uniqueid = find_child(tran, 'uniqueid')
                 if uniqueid is not None:
                     security_activity_dates.add((date, uniqueid))
                 cash_activity_dates.add(date)
 
                 if full_fitid in seen_fitids:
-                    logger.info("full_fitid (%s) already seen" % (str(full_fitid)))
+                    logger.debug("full_fitid (%s) already seen" % (full_fitid))
                     continue
-                logger.debug("full_fitid (%s) NOT seen yet" % (str(full_fitid)))
+                logger.debug("full_fitid (%s) NOT seen yet" % (full_fitid))
 
                 trantype = tran.name.upper()
                 if trantype == 'INVBANKTRAN' or trantype == 'STMTTRN':
@@ -753,14 +818,20 @@ class ParsedOfxStatement(object):
                     commission=find_child(tran, 'commission', D),
                     checknum=find_child(tran, 'checknum'),
                     filename=filename)
-                # GJP 2024-03-02 Now use total and checknum as key part instead of fitid
-                full_fitid2 = (account_ofx_id, date, str({'total': raw.total, 'checknum': raw.checknum}))
-                if full_fitid2 in seen_fitids:
-                    logger.info("full_fitid2 (%s) already seen" % (str(full_fitid2)))
-                    continue
-                logger.debug("full_fitid2 (%s) NOT seen yet" % (str(full_fitid2)))
+                if check_other_keys:
+                    key = {}
+                    for field in check_other_keys:
+                        if hasattr(raw, field):
+                            key[field] = getattr(raw, field)
+                    if len(key.keys()) > 0:
+                        # GJP 2024-03-02 Now use total and checknum as key part instead of fitid
+                        full_fitid2 = str(FullFitid(account_ofx_id, date, key))
+                        if full_fitid2 in seen_fitids:
+                            logger.warning("File: %s\ntransaction identified by (%s) duplicates\ntransaction identified by (%s)" % (self.filename, full_fitid2, full_fitid))
+                            continue
+                        logger.debug("full_fitid2 (%s) NOT seen yet" % (full_fitid2))
+                        seen_fitids.add(full_fitid2)
                 seen_fitids.add(full_fitid)
-                seen_fitids.add(full_fitid2)
                 raw_transactions.append(raw)
 
         for inv_bal in stmtrs.find_all('invbal'):
@@ -1263,7 +1334,9 @@ class ParsedOfxStatement(object):
 
 class ParsedOfxFile(object):
     def __init__(self, seen_fitids, filename,
-                 checknum_numeric=CHECKNUM_NUMERIC, check_balance=CHECK_BALANCE):
+                 checknum_numeric=CHECKNUM_NUMERIC,
+                 check_balance=CHECK_BALANCE,
+                 check_other_keys=CHECK_OTHER_KEYS):
         logger.debug(">ParsedOfxFile.__init__(filename=%s)" % (filename))
         self.filename = filename
         parsed_statements = self.parsed_statements = []
@@ -1288,7 +1361,8 @@ class ParsedOfxFile(object):
                     org=org,
                     stmtrs=stmtrs,
                     checknum_numeric=checknum_numeric,
-                    check_balance=check_balance))
+                    check_balance=check_balance,
+                    check_other_keys=check_other_keys))
         logger.debug("<ParsedOfxFile.__init__(filename=%s)" % (filename))
 
 
@@ -1324,40 +1398,6 @@ def get_account_map(accounts):
     logger.debug("<get_account_map()")
     return account_to_ofx_id, ofx_id_to_account, cash_accounts
 
-
-# GJP 2024-03-02
-# The key for OFX entries may not only be: (org, broker id, account_id) + date (dttrade/dtposted) + fitid.
-# It can also be: (org, broker id, account_id) + date (dttrade/dtposted) + checknum + total.
-# So the third FullFitid item was 'str' and becomes 'dict' with keys from named tuple RawTransactionEntry.
-# But since a dict is not hashable we need to convert it back to a string (!).
-#
-# The transactions below are the same although the fitid differs (the second is generated from a PDF).
-#
-# Transaction 1:
-#
-# 2024-01-08 * "STMTTRN - EDF - PRLV SEPA EDF clients particulie Numero de client 6022926937 MM9760229269370001"
-#   Assets:FR:BanquePopulaire:Checking:CompteCommun  -235.00 EUR
-#     ofx_fitid: "1306834516"
-#     date: 2024-01-08
-#     ofx_type: "STMTTRN"
-#     ofx_memo: "PRLV SEPA EDF clients particulie Numero de client 6022926937 MM9760229269370001"
-#     ofx_name: "EDF"
-#     check: "0G93JXY"
-#   Expenses:House:Electricity                        235.00 EUR  
-#
-# Transaction 2:
-#
-# 2024-01-08 * "STMTTRN - PRLV SEPA EDF clients pa - Numero de client : 6022926937 - MM9760229269370001"
-#   Assets:FR:BanquePopulaire:Checking:CompteCommun  -235.00 EUR
-#     ofx_fitid: "8b7d955a3f9b158aaa7ee9c679a5baf0b7d7ac3a"
-#     date: 2024-01-08
-#     ofx_type: "STMTTRN"
-#     ofx_memo: "Numero de client : 6022926937 - MM9760229269370001"
-#     ofx_name: "PRLV SEPA EDF clients pa"
-#     check: "0G93JXY"
-#   Expenses:FIXME                                    235.00 EUR
-
-FullFitid = Tuple[str, datetime.date, str]
 
 def prune_valid_duplicates(matches: List[Tuple[Transaction, Posting]]) -> List[Tuple[Transaction, Posting]]:
     """Remove from the list of matches duplicate postings with the account,
@@ -1450,8 +1490,8 @@ class PrepareState(object):
                     if fitid.startswith(FITID_TRANSFER_PREFIX):
                         fitid_transfer = fitid = fitid[len(
                             FITID_TRANSFER_PREFIX):]
-                    full_fitid = (ofx_id, date, fitid)
-                    logger.debug("full_fitid: %s" % (str(full_fitid)))
+                    full_fitid = str(FullFitid(ofx_id, date, {'fitid': fitid}))
+                    logger.debug("full_fitid: %s" % (full_fitid))
                     if posting.account in cash_accounts:
                         if fitid_transfer is not None:
                             matched = matched_cash_transfer_transactions
@@ -1475,7 +1515,7 @@ class PrepareState(object):
         for matched in (matched_transactions, matched_cash_transactions,
                         matched_cash_transfer_transactions):
             for full_fitid, transactions in matched.items():
-                logger.debug("full_fitid: %s" % (str(full_fitid)))
+                logger.debug("full_fitid: %s" % (full_fitid))
                 excess_number = len(transactions) - (full_fitid in source_fitids)
                 if excess_number == 0: continue
                 transactions = prune_valid_duplicates(transactions)
@@ -1492,6 +1532,7 @@ class OfxSource(Source):
                  cache_filename: Optional[str] = None,
                  checknum_numeric: Callable[[str], bool] = lambda ofx_filename: CHECKNUM_NUMERIC,
                  check_balance: Callable[[str], bool] = lambda ofx_filename: CHECK_BALANCE,
+                 check_other_keys: Callable[[str], List] = lambda ofx_filename: CHECK_OTHER_KEYS,
                  **kwargs) -> None:
         logger.debug(">OfxSource.__init__()")
         super().__init__(**kwargs)
@@ -1527,7 +1568,8 @@ class OfxSource(Source):
                 ParsedOfxFile(self.source_fitids,
                               filename,
                               checknum_numeric(filename),
-                              check_balance(filename)))
+                              check_balance(filename),
+                              check_other_keys(filename)))
 
         if cache_filename is not None:
             cache_data = {

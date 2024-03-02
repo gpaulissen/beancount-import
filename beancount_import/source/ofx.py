@@ -725,10 +725,9 @@ class ParsedOfxStatement(object):
                 cash_activity_dates.add(date)
 
                 if full_fitid in seen_fitids:
-                    logger.debug("full_fitid (%s) already seen" % (str(full_fitid)))
+                    logger.info("full_fitid (%s) already seen" % (str(full_fitid)))
                     continue
-                logger.debug("full_fitid (%s) NOT seen yet: adding it now" % (str(full_fitid)))
-                seen_fitids.add(full_fitid)
+                logger.debug("full_fitid (%s) NOT seen yet" % (str(full_fitid)))
 
                 trantype = tran.name.upper()
                 if trantype == 'INVBANKTRAN' or trantype == 'STMTTRN':
@@ -754,6 +753,14 @@ class ParsedOfxStatement(object):
                     commission=find_child(tran, 'commission', D),
                     checknum=find_child(tran, 'checknum'),
                     filename=filename)
+                # GJP 2024-03-02 Now use total and checknum as key part instead of fitid
+                full_fitid2 = (account_ofx_id, date, str({'total': raw.total, 'checknum': raw.checknum}))
+                if full_fitid2 in seen_fitids:
+                    logger.info("full_fitid2 (%s) already seen" % (str(full_fitid2)))
+                    continue
+                logger.debug("full_fitid2 (%s) NOT seen yet" % (str(full_fitid2)))
+                seen_fitids.add(full_fitid)
+                seen_fitids.add(full_fitid2)
                 raw_transactions.append(raw)
 
         for inv_bal in stmtrs.find_all('invbal'):
@@ -1318,6 +1325,38 @@ def get_account_map(accounts):
     return account_to_ofx_id, ofx_id_to_account, cash_accounts
 
 
+# GJP 2024-03-02
+# The key for OFX entries may not only be: (org, broker id, account_id) + date (dttrade/dtposted) + fitid.
+# It can also be: (org, broker id, account_id) + date (dttrade/dtposted) + checknum + total.
+# So the third FullFitid item was 'str' and becomes 'dict' with keys from named tuple RawTransactionEntry.
+# But since a dict is not hashable we need to convert it back to a string (!).
+#
+# The transactions below are the same although the fitid differs (the second is generated from a PDF).
+#
+# Transaction 1:
+#
+# 2024-01-08 * "STMTTRN - EDF - PRLV SEPA EDF clients particulie Numero de client 6022926937 MM9760229269370001"
+#   Assets:FR:BanquePopulaire:Checking:CompteCommun  -235.00 EUR
+#     ofx_fitid: "1306834516"
+#     date: 2024-01-08
+#     ofx_type: "STMTTRN"
+#     ofx_memo: "PRLV SEPA EDF clients particulie Numero de client 6022926937 MM9760229269370001"
+#     ofx_name: "EDF"
+#     check: "0G93JXY"
+#   Expenses:House:Electricity                        235.00 EUR  
+#
+# Transaction 2:
+#
+# 2024-01-08 * "STMTTRN - PRLV SEPA EDF clients pa - Numero de client : 6022926937 - MM9760229269370001"
+#   Assets:FR:BanquePopulaire:Checking:CompteCommun  -235.00 EUR
+#     ofx_fitid: "8b7d955a3f9b158aaa7ee9c679a5baf0b7d7ac3a"
+#     date: 2024-01-08
+#     ofx_type: "STMTTRN"
+#     ofx_memo: "Numero de client : 6022926937 - MM9760229269370001"
+#     ofx_name: "PRLV SEPA EDF clients pa"
+#     check: "0G93JXY"
+#   Expenses:FIXME                                    235.00 EUR
+
 FullFitid = Tuple[str, datetime.date, str]
 
 def prune_valid_duplicates(matches: List[Tuple[Transaction, Posting]]) -> List[Tuple[Transaction, Posting]]:
@@ -1533,7 +1572,7 @@ class OfxSource(Source):
 
 
 def load(spec, log_status):
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     return OfxSource(log_status=log_status, **spec)
 
 def convert2ofx(input_file_type: str,

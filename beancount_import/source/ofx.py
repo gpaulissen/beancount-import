@@ -497,6 +497,9 @@ from ..matching import FIXME_ACCOUNT, CHECK_KEY
 from ..training import ExampleKeyValuePairs
 
 
+logger = logging.getLogger(__name__)
+
+
 # find_child function was derived from implementation in beancount/ingest/importers/ofx.pytest
 # Copyright (C) 2016  Martin Blais
 # GNU GPLv2
@@ -661,7 +664,7 @@ CHECK_BALANCE = False     # False is old behavior
 class ParsedOfxStatement(object):
     def __init__(self, seen_fitids, filename, securities_map, org, stmtrs,
                  checknum_numeric=CHECKNUM_NUMERIC, check_balance=CHECK_BALANCE):
-        logging.debug(">ParsedOfxStatement.__init__(filename=%s)" % (filename))
+        logger.debug(">ParsedOfxStatement.__init__(filename=%s)" % (filename))
         filename = os.path.abspath(filename)
         self.filename = filename
         self.securities_map = securities_map
@@ -722,7 +725,9 @@ class ParsedOfxStatement(object):
                 cash_activity_dates.add(date)
 
                 if full_fitid in seen_fitids:
+                    logger.debug("full_fitid (%s) already seen" % (str(full_fitid)))
                     continue
+                logger.debug("full_fitid (%s) NOT seen yet: adding it now" % (str(full_fitid)))
                 seen_fitids.add(full_fitid)
 
                 trantype = tran.name.upper()
@@ -789,10 +794,10 @@ class ParsedOfxStatement(object):
                         unitprice=find_child(invpos, 'unitprice', D),
                         inv401ksource=find_child(invpos, 'inv401ksource'),
                         filename=filename))
-        logging.debug("<ParsedOfxStatement.__init__(filename=%s)" % (filename))
+        logger.debug("<ParsedOfxStatement.__init__(filename=%s)" % (filename))
 
     def get_entries(self, prepare_state):
-        logging.debug(">ParsedOfxStatement.get_entries()")
+        logger.debug(">ParsedOfxStatement.get_entries()")
         account = prepare_state.ofx_id_to_account.get(self.ofx_id)
         results = prepare_state.results
         if account is None:
@@ -1246,13 +1251,13 @@ class ParsedOfxStatement(object):
                         date=raw.date,
                         entries=[price_entry],
                         info=get_info(raw)))
-        logging.debug("<ParsedOfxStatement.get_entries()")
+        logger.debug("<ParsedOfxStatement.get_entries()")
 
 
 class ParsedOfxFile(object):
     def __init__(self, seen_fitids, filename,
                  checknum_numeric=CHECKNUM_NUMERIC, check_balance=CHECK_BALANCE):
-        logging.debug(">ParsedOfxFile.__init__(filename=%s)" % (filename))
+        logger.debug(">ParsedOfxFile.__init__(filename=%s)" % (filename))
         self.filename = filename
         parsed_statements = self.parsed_statements = []
 
@@ -1277,11 +1282,11 @@ class ParsedOfxFile(object):
                     stmtrs=stmtrs,
                     checknum_numeric=checknum_numeric,
                     check_balance=check_balance))
-        logging.debug("<ParsedOfxFile.__init__(filename=%s)" % (filename))
+        logger.debug("<ParsedOfxFile.__init__(filename=%s)" % (filename))
 
 
 def get_account_map(accounts):
-    logging.debug(">get_account_map(accounts=%s)" % (accounts))
+    logger.debug(">get_account_map()")
     account_to_ofx_id = dict()
     ofx_id_to_account = dict()
     cash_accounts = set()
@@ -1309,7 +1314,7 @@ def get_account_map(accounts):
             other = entry.meta.get(key)
             if other is not None:
                 account_to_ofx_id[other] = ofx_id
-    logging.debug("<get_account_map(accounts=%s)" % (accounts))
+    logger.debug("<get_account_map()")
     return account_to_ofx_id, ofx_id_to_account, cash_accounts
 
 
@@ -1321,26 +1326,28 @@ def prune_valid_duplicates(matches: List[Tuple[Transaction, Posting]]) -> List[T
 
     These postings may have been manually specified for a TRANSFER transaction.
     """
-    logging.debug(">prune_valid_duplicates()")
+    logger.debug(">prune_valid_duplicates()")
     seen = set()  # type: Set[Tuple[int, str, str]]
 
     def should_include(match: Tuple[Transaction, Posting]) -> bool:
         posting = match[1]
         if posting.units is MISSING: return True
         key = (id(match[0]), posting.account, posting.units.currency)
-        if key in seen: return False
+        if key in seen:
+            logger.debug("key (match[0]=%s, account=%s, currency=%s) already seen", match[0], posting.account, posting.units.currency)
+            return False
         seen.add(key)
         return True
 
     result = [x for x in matches if should_include(x)]
-    logging.debug("<prune_valid_duplicates()")
+    logger.debug("<prune_valid_duplicates()")
     return result
 
 
 class PrepareState(object):
     def __init__(self, source: 'OfxSource', journal: JournalEditor,
                  results: SourceResults) -> None:
-        logging.debug(">PrepareState.__init__()")
+        logger.debug(">PrepareState.__init__()")
         self.source = source
         self.journal = journal
         self.account_to_ofx_id, self.ofx_id_to_account, self.cash_accounts = get_account_map(
@@ -1357,7 +1364,7 @@ class PrepareState(object):
         self.results = results
 
         self._process_journal_entries()
-        logging.debug("<PrepareState.__init__()")
+        logger.debug("<PrepareState.__init__()")
 
     def get_accounts_and_entries(self):
         for parsed_file in self.source.parsed_files:
@@ -1365,6 +1372,7 @@ class PrepareState(object):
                 statement.get_entries(self)
 
     def _process_journal_entries(self):
+        logger.debug(">PrepareState._process_journal_entries()")
         source_fitids = self.source.source_fitids
         matched_transactions = self.matched_transactions
         cash_accounts = self.cash_accounts
@@ -1404,6 +1412,7 @@ class PrepareState(object):
                         fitid_transfer = fitid = fitid[len(
                             FITID_TRANSFER_PREFIX):]
                     full_fitid = (ofx_id, date, fitid)
+                    logger.debug("full_fitid: %s" % (str(full_fitid)))
                     if posting.account in cash_accounts:
                         if fitid_transfer is not None:
                             matched = matched_cash_transfer_transactions
@@ -1427,6 +1436,7 @@ class PrepareState(object):
         for matched in (matched_transactions, matched_cash_transactions,
                         matched_cash_transfer_transactions):
             for full_fitid, transactions in matched.items():
+                logger.debug("full_fitid: %s" % (str(full_fitid)))
                 excess_number = len(transactions) - (full_fitid in source_fitids)
                 if excess_number == 0: continue
                 transactions = prune_valid_duplicates(transactions)
@@ -1434,6 +1444,7 @@ class PrepareState(object):
                 if excess_number == 0: continue
                 results.add_invalid_reference(
                     InvalidSourceReference(excess_number, transactions))
+        logger.debug("<PrepareState._process_journal_entries()")
 
 
 class OfxSource(Source):
@@ -1443,7 +1454,7 @@ class OfxSource(Source):
                  checknum_numeric: Callable[[str], bool] = lambda ofx_filename: CHECKNUM_NUMERIC,
                  check_balance: Callable[[str], bool] = lambda ofx_filename: CHECK_BALANCE,
                  **kwargs) -> None:
-        logging.debug(">OfxSource.__init__(ofx_filenames: %s)" % (ofx_filenames))
+        logger.debug(">OfxSource.__init__()")
         super().__init__(**kwargs)
         self.ofx_filenames = [os.path.realpath(x) for x in ofx_filenames]
         self.source_fitids = set()  # type: Set[FullFitid]
@@ -1487,7 +1498,7 @@ class OfxSource(Source):
             }
             with atomic_write(cache_filename, mode='wb', overwrite=True) as wcache_f:
                 pickle.dump(cache_data, wcache_f)
-        logging.debug("<OfxSource.__init__(ofx_filenames: %s)" % (ofx_filenames))
+        logger.debug("<OfxSource.__init__()")
 
     def get_example_key_value_pairs(self, transaction: Transaction,
                                     posting: Posting) -> ExampleKeyValuePairs:
@@ -1522,7 +1533,7 @@ class OfxSource(Source):
 
 
 def load(spec, log_status):
-    logging.setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
     return OfxSource(log_status=log_status, **spec)
 
 def convert2ofx(input_file_type: str,

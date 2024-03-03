@@ -475,7 +475,7 @@ of the manually created postings, as shown below:
 
 import pickle
 import re
-from typing import Set, Tuple, Any, Dict, Union, List, Optional, NamedTuple, Callable, FrozenSet
+from typing import Set, Tuple, Any, Dict, Union, List, Optional, NamedTuple, Callable
 import os
 import collections
 import datetime
@@ -604,7 +604,6 @@ SecurityInfo = NamedTuple('SecurityInfo', [
 #     check: "0G93JXY"
 #   Expenses:FIXME                                    235.00 EUR
 
-#FullFitid = Tuple[Tuple[str, str, str], datetime.date, FrozenSet[Tuple[str, str]]]
 FullFitid = Tuple[Tuple[str, str, str], datetime.date, str]
 
 def dict_to_frozenset(dict_obj):
@@ -615,35 +614,27 @@ def full_fitid_to_str(full_fitid: FullFitid) -> str:
     logger.debug(f"type(full_fitid): {type(full_fitid)}")
     result = ''
     org = full_fitid[0][0]
-    brokerid = full_fitid[0][1]
-    accountid = full_fitid[0][2]
-    date = full_fitid[1]
-    fitid = full_fitid[2]
     if org:
         result += f'org={org}, '
+    brokerid = full_fitid[0][1]
     if brokerid:
         result += f'brokerid={brokerid}, '
+    accountid = full_fitid[0][2]
     if accountid:
         result += f'accountid={accountid}, '
+    date = full_fitid[1]
     result += f'date={date}, '
-    result += f'fitid={fitid}, '
+    logger.debug(f"type(full_fitid[2]): {type(full_fitid[2])}")
+    key = full_fitid[2]
+    if not key[0] == '{':
+        result += f'fitid={key}, '
+    else:
+        key = eval(key)
+        for k in sorted(key.keys()):
+            v = key[k]
+            if v is not None:
+                result += f'{k}: {v}, '
     return result[0:len(result)-2]
-
-#
-#     def __repr__(self):
-#         if self.org:
-#             result += f'org={self.org}, '
-#         if self.brokerid:
-#             result += f'brokerid={self.brokerid}, '
-#         if self.accountid:
-#             result += f'accountid={self.accountid}, '
-#         result += f'date={self.date}, '
-#         for k in sorted(self.__dict__.keys()):
-#             if k not in ['org', 'brokerid', 'accountid', 'date']:
-#                 v = getattr(self, k)
-#                 if v is not None:
-#                     result += f'{k}: {v}, '
-#         return result[0:len(result)-2]
 
 
 def get_info(
@@ -748,7 +739,7 @@ class ParsedOfxStatement(object):
                  checknum_numeric=CHECKNUM_NUMERIC,
                  check_balance=CHECK_BALANCE,
                  check_other_keys=CHECK_OTHER_KEYS):
-        logger.debug(">ParsedOfxStatement.__init__(filename=%s)" % (filename))
+        logger.debug(">ParsedOfxStatement.__init__(filename=%s, checknum_numeric=%s, check_balance=%s, check_other_keys=%s)" % (filename, checknum_numeric, check_balance, check_other_keys))
         filename = os.path.abspath(filename)
         self.filename = filename
         self.securities_map = securities_map
@@ -813,6 +804,7 @@ class ParsedOfxStatement(object):
                     logger.debug("full_fitid (%s) already seen" % (full_fitid_to_str(full_fitid)))
                     continue
                 logger.debug("full_fitid (%s) NOT seen yet" % (full_fitid_to_str(full_fitid)))
+                seen_fitids.add(full_fitid)
 
                 trantype = tran.name.upper()
                 if trantype == 'INVBANKTRAN' or trantype == 'STMTTRN':
@@ -838,20 +830,19 @@ class ParsedOfxStatement(object):
                     commission=find_child(tran, 'commission', D),
                     checknum=find_child(tran, 'checknum'),
                     filename=filename)
-#                 if check_other_keys and False:
-#                     key = {}
-#                     for field in check_other_keys:
-#                         if hasattr(raw, field):
-#                             key[field] = getattr(raw, field)
-#                     if len(key.keys()) > 0:
-#                         # GJP 2024-03-02 Now use total and checknum as key part instead of fitid
-#                         full_fitid2 = (account_ofx_id, date, dict_to_frozenset(key))
-#                         if full_fitid2 in seen_fitids:
-#                             logger.warning("File: %s\ntransaction identified by (%s) duplicates\ntransaction identified by (%s)" % (self.filename, full_fitid_to_str(full_fitid2), full_fitid_to_str(full_fitid)))
-#                             continue
-#                         logger.debug("full_fitid2 (%s) NOT seen yet" % (full_fitid2))
-#                         seen_fitids.add(full_fitid2)
-                seen_fitids.add(full_fitid)
+                if check_other_keys:
+                    key = {}
+                    for field in check_other_keys:
+                        if hasattr(raw, field):
+                            key[field] = getattr(raw, field)
+                    if len(key.keys()) > 0:
+                        # GJP 2024-03-02 Now use total and checknum as key part instead of fitid
+                        full_fitid2 = (account_ofx_id, date, str(key))
+                        if full_fitid2 in seen_fitids:
+                            logger.warning("File: %s\ntransaction identified by (%s) duplicates\ntransaction identified by (%s)" % (self.filename, full_fitid_to_str(full_fitid2), full_fitid_to_str(full_fitid)))
+                            continue
+                        logger.debug("full_fitid2 (%s) NOT seen yet" % (full_fitid_to_str(full_fitid2)))
+                        seen_fitids.add(full_fitid2)
                 raw_transactions.append(raw)
 
         for inv_bal in stmtrs.find_all('invbal'):

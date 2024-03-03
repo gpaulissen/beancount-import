@@ -590,7 +590,7 @@ SecurityInfo = NamedTuple('SecurityInfo', [
 #     ofx_memo: "PRLV SEPA EDF clients particulie Numero de client 6022926937 MM9760229269370001"
 #     ofx_name: "EDF"
 #     check: "0G93JXY"
-#   Expenses:House:Electricity                        235.00 EUR  
+#   Expenses:House:Electricity                        235.00 EUR
 #
 # Transaction 2:
 #
@@ -604,27 +604,47 @@ SecurityInfo = NamedTuple('SecurityInfo', [
 #     check: "0G93JXY"
 #   Expenses:FIXME                                    235.00 EUR
 
-class FullFitid(NamedTuple):
-    account_ofx_id: tuple
-    date: datetime.date
-    key: dict
+class FullFitid(object):
+    def __init__(self, org, brokerid, accountid, date, **kwargs):
+        self.org = org
+        self.brokerid = brokerid
+        self.accountid = accountid
+        self.date = date
+        for k in kwargs:
+            if kwargs[k]:
+                setattr(self, k, kwargs[k])
 
     def __repr__(self):
-        org = self.account_ofx_id[0]
-        brokerid = self.account_ofx_id[1]
-        accountid = self.account_ofx_id[2]
         result = ''
-        if org:
-            result += f'org={org}, '
-        if brokerid:
-            result += f'brokerid={brokerid}, '
-        if accountid:
-            result += f'accountid={accountid}, '
+        if self.org:
+            result += f'org={self.org}, '
+        if self.brokerid:
+            result += f'brokerid={self.brokerid}, '
+        if self.accountid:
+            result += f'accountid={self.accountid}, '
         result += f'date={self.date}, '
-        for k, v in self.key.items():
-            if v is not None:
-                result += f'{k}: {v}, '
+        for k in sorted(self.__dict__.keys()):
+            if k not in ['org', 'brokerid', 'accountid', 'date']:
+                v = getattr(self, k)
+                if v is not None:
+                    result += f'{k}: {v}, '
         return result[0:len(result)-2]
+
+#
+#     def __repr__(self):
+#         if self.org:
+#             result += f'org={self.org}, '
+#         if self.brokerid:
+#             result += f'brokerid={self.brokerid}, '
+#         if self.accountid:
+#             result += f'accountid={self.accountid}, '
+#         result += f'date={self.date}, '
+#         for k in sorted(self.__dict__.keys()):
+#             if k not in ['org', 'brokerid', 'accountid', 'date']:
+#                 v = getattr(self, k)
+#                 if v is not None:
+#                     result += f'{k}: {v}, '
+#         return result[0:len(result)-2]
 
 
 def get_info(
@@ -783,16 +803,19 @@ class ParsedOfxStatement(object):
                 # We include the date along with the FITID because some financial institutions fail
                 # to produce truly unique FITID values.  For example, National Financial Services
                 # (Fidelity) sometimes produces duplicates when the amount is the same.
-                full_fitid = str(FullFitid(account_ofx_id, date, {'fitid': fitid}))
+                key = {'fitid': fitid}
+                full_fitid = FullFitid(*account_ofx_id, date, **key)
+                # full_fitid = (account_ofx_id, date, fitid)
+                # full_fitid = (account_ofx_id, date, str({'fitid': fitid}))
                 uniqueid = find_child(tran, 'uniqueid')
                 if uniqueid is not None:
                     security_activity_dates.add((date, uniqueid))
                 cash_activity_dates.add(date)
 
                 if full_fitid in seen_fitids:
-                    logger.debug("full_fitid (%s) already seen" % (full_fitid))
+                    logger.debug("full_fitid (%s) already seen" % (str(full_fitid)))
                     continue
-                logger.debug("full_fitid (%s) NOT seen yet" % (full_fitid))
+                logger.debug("full_fitid (%s) NOT seen yet" % (str(full_fitid)))
 
                 trantype = tran.name.upper()
                 if trantype == 'INVBANKTRAN' or trantype == 'STMTTRN':
@@ -818,19 +841,19 @@ class ParsedOfxStatement(object):
                     commission=find_child(tran, 'commission', D),
                     checknum=find_child(tran, 'checknum'),
                     filename=filename)
-                if check_other_keys:
-                    key = {}
-                    for field in check_other_keys:
-                        if hasattr(raw, field):
-                            key[field] = getattr(raw, field)
-                    if len(key.keys()) > 0:
-                        # GJP 2024-03-02 Now use total and checknum as key part instead of fitid
-                        full_fitid2 = str(FullFitid(account_ofx_id, date, key))
-                        if full_fitid2 in seen_fitids:
-                            logger.warning("File: %s\ntransaction identified by (%s) duplicates\ntransaction identified by (%s)" % (self.filename, full_fitid2, full_fitid))
-                            continue
-                        logger.debug("full_fitid2 (%s) NOT seen yet" % (full_fitid2))
-                        seen_fitids.add(full_fitid2)
+#                 if check_other_keys and False:
+#                     key = {}
+#                     for field in check_other_keys:
+#                         if hasattr(raw, field):
+#                             key[field] = getattr(raw, field)
+#                     if len(key.keys()) > 0:
+#                         # GJP 2024-03-02 Now use total and checknum as key part instead of fitid
+#                         full_fitid2 = str(FullFitid(account_ofx_id, date, key))
+#                         if full_fitid2 in seen_fitids:
+#                             logger.warning("File: %s\ntransaction identified by (%s) duplicates\ntransaction identified by (%s)" % (self.filename, full_fitid2, full_fitid))
+#                             continue
+#                         logger.debug("full_fitid2 (%s) NOT seen yet" % (full_fitid2))
+#                         seen_fitids.add(full_fitid2)
                 seen_fitids.add(full_fitid)
                 raw_transactions.append(raw)
 
@@ -1134,7 +1157,7 @@ class ParsedOfxStatement(object):
                 else:
                     number_per_fix = unitprice
                     if abs(total + fee_total + (units * unitprice)) >= TOLERANCE:
-                    	number_per_fix = normalize_fraction((abs(total)-abs(fee_total))/units)
+                        number_per_fix = normalize_fraction((abs(total)-abs(fee_total))/units)
                     cost_spec = CostSpec(
                         number_per=number_per_fix,
                         number_total=None,
@@ -1490,8 +1513,11 @@ class PrepareState(object):
                     if fitid.startswith(FITID_TRANSFER_PREFIX):
                         fitid_transfer = fitid = fitid[len(
                             FITID_TRANSFER_PREFIX):]
-                    full_fitid = str(FullFitid(ofx_id, date, {'fitid': fitid}))
-                    logger.debug("full_fitid: %s" % (full_fitid))
+                    key = {'fitid': fitid}
+                    full_fitid = FullFitid(*ofx_id, date, **key)
+                    #full_fitid = (ofx_id, date, fitid)
+                    #full_fitid = (ofx_id, date, str({'fitid': fitid}))
+                    logger.debug("full_fitid: %s" % (str(full_fitid)))
                     if posting.account in cash_accounts:
                         if fitid_transfer is not None:
                             matched = matched_cash_transfer_transactions
@@ -1515,7 +1541,7 @@ class PrepareState(object):
         for matched in (matched_transactions, matched_cash_transactions,
                         matched_cash_transfer_transactions):
             for full_fitid, transactions in matched.items():
-                logger.debug("full_fitid: %s" % (full_fitid))
+                logger.debug("full_fitid: %s" % (str(full_fitid)))
                 excess_number = len(transactions) - (full_fitid in source_fitids)
                 if excess_number == 0: continue
                 transactions = prune_valid_duplicates(transactions)
@@ -1614,7 +1640,7 @@ class OfxSource(Source):
 
 
 def load(spec, log_status):
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     return OfxSource(log_status=log_status, **spec)
 
 def convert2ofx(input_file_type: str,

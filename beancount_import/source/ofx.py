@@ -837,7 +837,10 @@ class ParsedOfxStatement(object):
                 if key:
                     # GJP 2024-03-02 Now use total and checknum as key part instead of fitid
                     transaction_key2 = (account_ofx_id, date, str(key))
-                    if transaction_key2 in seen_transaction_keys:
+                    if transaction_key2 not in seen_transaction_keys:
+                        logger.debug("transaction_key2 (%s) NOT seen yet" % (transaction_key_to_str(transaction_key2)))
+                        seen_transaction_keys[transaction_key2] = fitid
+                    elif seen_transaction_keys[transaction_key2] != fitid and not(re.fullmatch(r'[0-9A-E]+', fitid)):
                         logger.warning("Transaction identified by (%s) will receive a new fitid (%s => %s)" %
                                        (transaction_key_to_str(transaction_key2), fitid, seen_transaction_keys[transaction_key2]))
                         fitid = seen_transaction_keys[transaction_key2]
@@ -860,9 +863,6 @@ class ParsedOfxStatement(object):
                             commission=raw.commission,
                             checknum=raw.checknum,
                             filename=raw.filename)
-                    else:
-                        logger.debug("transaction_key2 (%s) NOT seen yet" % (transaction_key_to_str(transaction_key2)))
-                        seen_transaction_keys[transaction_key2] = fitid
 
                 transaction_key = (account_ofx_id, date, fitid)
                 if transaction_key in seen_transaction_keys:

@@ -575,7 +575,7 @@ SecurityInfo = NamedTuple('SecurityInfo', [
 # GJP 2024-03-02
 # The key for OFX entries may not only be: (org, broker id, account_id) + date (dttrade/dtposted) + fitid.
 # It can also be: (org, broker id, account_id) + date (dttrade/dtposted) + checknum + total.
-# So the third FullFitid item was 'str' and becomes 'dict' with keys from named tuple RawTransactionEntry.
+# So the third FullFitid (new name TransactionKey) item was 'str' and becomes 'dict' with keys from named tuple RawTransactionEntry.
 # But since a dict is not hashable we need to convert it back to a string (!).
 #
 # The transactions below are the same although the fitid differs (the second is generated from a PDF).
@@ -604,28 +604,27 @@ SecurityInfo = NamedTuple('SecurityInfo', [
 #     check: "0G93JXY"
 #   Expenses:FIXME                                    235.00 EUR
 
-FullFitid = Tuple[Tuple[str, str, str], datetime.date, str]
+# FullFitid = Tuple[Tuple[str, str, str], datetime.date, str]
+TransactionKey = Tuple[Tuple[str, str, str], datetime.date, str]
 
-def dict_to_frozenset(dict_obj):
-    return frozenset(dict_obj.items())
 
-def full_fitid_to_str(full_fitid: FullFitid) -> str:
-    logger.debug(f"full_fitid: {full_fitid}")
-    logger.debug(f"type(full_fitid): {type(full_fitid)}")
+def transaction_key_to_str(transaction_key: TransactionKey) -> str:
+    logger.debug(f"transaction_key: {transaction_key}")
+    logger.debug(f"type(transaction_key): {type(transaction_key)}")
     result = ''
-    org = full_fitid[0][0]
+    org = transaction_key[0][0]
     if org:
         result += f'org={org}, '
-    brokerid = full_fitid[0][1]
+    brokerid = transaction_key[0][1]
     if brokerid:
         result += f'brokerid={brokerid}, '
-    accountid = full_fitid[0][2]
+    accountid = transaction_key[0][2]
     if accountid:
         result += f'accountid={accountid}, '
-    date = full_fitid[1]
+    date = transaction_key[1]
     result += f'date={date}, '
-    logger.debug(f"type(full_fitid[2]): {type(full_fitid[2])}")
-    key = full_fitid[2]
+    logger.debug(f"type(transaction_key[2]): {type(transaction_key[2])}")
+    key = transaction_key[2]
     if not key[0] == '{':
         result += f'fitid={key}, '
     else:
@@ -635,6 +634,17 @@ def full_fitid_to_str(full_fitid: FullFitid) -> str:
             if v is not None:
                 result += f'{k}: {v}, '
     return result[0:len(result)-2]
+
+
+def get_other_key(raw_transaction_entry: RawTransactionEntry, check_other_keys: List[str]):
+    if check_other_keys:
+        key = {}
+        for field in check_other_keys:
+            if hasattr(raw_transaction_entry, field):
+                key[field] = getattr(raw_transaction_entry, field)
+        if len(key.keys()) > 0:
+            return key
+    return None
 
 
 def get_info(
@@ -735,10 +745,10 @@ CHECK_OTHER_KEYS = []     # Empty is old behaviour
 
 
 class ParsedOfxStatement(object):
-    def __init__(self, seen_fitids, filename, securities_map, org, stmtrs,
+    def __init__(self, seen_transaction_keys, filename, securities_map, org, stmtrs,
                  checknum_numeric=CHECKNUM_NUMERIC,
                  check_balance=CHECK_BALANCE,
-                 check_other_keys=CHECK_OTHER_KEYS):
+                 check_other_keys: List[str] = CHECK_OTHER_KEYS):
         logger.debug(">ParsedOfxStatement.__init__(filename=%s, checknum_numeric=%s, check_balance=%s, check_other_keys=%s)" % (filename, checknum_numeric, check_balance, check_other_keys))
         filename = os.path.abspath(filename)
         self.filename = filename
@@ -793,18 +803,10 @@ class ParsedOfxStatement(object):
                 # We include the date along with the FITID because some financial institutions fail
                 # to produce truly unique FITID values.  For example, National Financial Services
                 # (Fidelity) sometimes produces duplicates when the amount is the same.
-                #full_fitid = (account_ofx_id, date, dict_to_frozenset({'fitid': fitid}))
-                full_fitid = (account_ofx_id, date, fitid)
                 uniqueid = find_child(tran, 'uniqueid')
                 if uniqueid is not None:
                     security_activity_dates.add((date, uniqueid))
                 cash_activity_dates.add(date)
-
-                if full_fitid in seen_fitids:
-                    logger.debug("full_fitid (%s) already seen" % (full_fitid_to_str(full_fitid)))
-                    continue
-                logger.debug("full_fitid (%s) NOT seen yet" % (full_fitid_to_str(full_fitid)))
-                seen_fitids.add(full_fitid)
 
                 trantype = tran.name.upper()
                 if trantype == 'INVBANKTRAN' or trantype == 'STMTTRN':
@@ -830,19 +832,46 @@ class ParsedOfxStatement(object):
                     commission=find_child(tran, 'commission', D),
                     checknum=find_child(tran, 'checknum'),
                     filename=filename)
-                if check_other_keys:
-                    key = {}
-                    for field in check_other_keys:
-                        if hasattr(raw, field):
-                            key[field] = getattr(raw, field)
-                    if len(key.keys()) > 0:
-                        # GJP 2024-03-02 Now use total and checknum as key part instead of fitid
-                        full_fitid2 = (account_ofx_id, date, str(key))
-                        if full_fitid2 in seen_fitids:
-                            logger.warning("File: %s\ntransaction identified by (%s) duplicates\ntransaction identified by (%s)" % (self.filename, full_fitid_to_str(full_fitid2), full_fitid_to_str(full_fitid)))
-                            continue
-                        logger.debug("full_fitid2 (%s) NOT seen yet" % (full_fitid_to_str(full_fitid2)))
-                        seen_fitids.add(full_fitid2)
+
+                key = get_other_key(raw, check_other_keys)
+                if key:
+                    # GJP 2024-03-02 Now use total and checknum as key part instead of fitid
+                    transaction_key2 = (account_ofx_id, date, str(key))
+                    if transaction_key2 in seen_transaction_keys:
+                        logger.warning("Transaction identified by (%s) will receive a new fitid (%s => %s)" %
+                                       (transaction_key_to_str(transaction_key2), fitid, seen_transaction_keys[transaction_key2]))
+                        fitid = seen_transaction_keys[transaction_key2]
+                        # make a copy but with a different fitid
+                        raw = RawTransactionEntry(
+                            trantype=raw.trantype,
+                            fitid=fitid,
+                            date=raw.date,
+                            total=raw.total,
+                            incometype=raw.incometype,
+                            inv401ksource=raw.inv401ksource,
+                            memo=raw.memo,
+                            name=raw.name,
+                            trntype=raw.trntype,
+                            uniqueid=raw.uniqueid,
+                            units=raw.units,
+                            unitprice=raw.unitprice,
+                            tferaction=raw.tferaction,
+                            fees=raw.fees,
+                            commission=raw.commission,
+                            checknum=raw.checknum,
+                            filename=raw.filename)
+                    else:
+                        logger.debug("transaction_key2 (%s) NOT seen yet" % (transaction_key_to_str(transaction_key2)))
+                        seen_transaction_keys[transaction_key2] = fitid
+
+                transaction_key = (account_ofx_id, date, fitid)
+                if transaction_key in seen_transaction_keys:
+                    logger.debug("transaction_key (%s) already seen in file %s" %
+                                 (transaction_key_to_str(transaction_key), seen_transaction_keys[transaction_key]))
+                    continue
+                logger.debug("transaction_key (%s) NOT seen yet" % (transaction_key_to_str(transaction_key)))
+                seen_transaction_keys[transaction_key] = os.path.relpath(filename)
+
                 raw_transactions.append(raw)
 
         for inv_bal in stmtrs.find_all('invbal'):
@@ -1344,7 +1373,7 @@ class ParsedOfxStatement(object):
 
 
 class ParsedOfxFile(object):
-    def __init__(self, seen_fitids, filename,
+    def __init__(self, seen_transaction_keys, filename,
                  checknum_numeric=CHECKNUM_NUMERIC,
                  check_balance=CHECK_BALANCE,
                  check_other_keys=CHECK_OTHER_KEYS):
@@ -1366,7 +1395,7 @@ class ParsedOfxFile(object):
         for stmtrs in soup.find_all(re.compile('.*stmtrs$')):
             parsed_statements.append(
                 ParsedOfxStatement(
-                    seen_fitids=seen_fitids,
+                    seen_transaction_keys=seen_transaction_keys,
                     filename=filename,
                     securities_map=securities_map,
                     org=org,
@@ -1446,11 +1475,11 @@ class PrepareState(object):
         self.commodities_by_cusip = dict()  # type: Dict[str, str]
         self.cash_securities_map = dict() # type: Dict[str, str]
         self.matched_transactions = dict(
-        )  # type: Dict[FullFitid, List[Tuple[Transaction, Posting]]]
+        )  # type: Dict[TransactionKey, List[Tuple[Transaction, Posting]]]
         self.matched_cash_transactions = dict(
-        )  # type: Dict[FullFitid, List[Tuple[Transaction, Posting]]]
+        )  # type: Dict[TransactionKey, List[Tuple[Transaction, Posting]]]
         self.matched_cash_transfer_transactions = dict(
-        )  # type: Dict[FullFitid, List[Tuple[Transaction, Posting]]]
+        )  # type: Dict[TransactionKey, List[Tuple[Transaction, Posting]]]
         self.results = results
 
         self._process_journal_entries()
@@ -1463,7 +1492,7 @@ class PrepareState(object):
 
     def _process_journal_entries(self):
         logger.debug(">PrepareState._process_journal_entries()")
-        source_fitids = self.source.source_fitids
+        source_transaction_keys = self.source.source_transaction_keys
         matched_transactions = self.matched_transactions
         cash_accounts = self.cash_accounts
         matched_cash_transactions = self.matched_cash_transactions
@@ -1501,9 +1530,8 @@ class PrepareState(object):
                     if fitid.startswith(FITID_TRANSFER_PREFIX):
                         fitid_transfer = fitid = fitid[len(
                             FITID_TRANSFER_PREFIX):]
-                    #full_fitid = (ofx_id, date, dict_to_frozenset({'fitid': fitid}))
-                    full_fitid = (ofx_id, date, fitid)
-                    logger.debug("full_fitid: %s" % (full_fitid_to_str(full_fitid)))
+                    transaction_key = (ofx_id, date, fitid)
+                    logger.debug("transaction_key: %s" % (transaction_key_to_str(transaction_key)))
                     if posting.account in cash_accounts:
                         if fitid_transfer is not None:
                             matched = matched_cash_transfer_transactions
@@ -1517,7 +1545,7 @@ class PrepareState(object):
                                 posting.meta)
                             continue
                         matched = matched_transactions
-                    matched.setdefault(full_fitid, []).append((entry, posting))
+                    matched.setdefault(transaction_key, []).append((entry, posting))
             elif isinstance(entry, Commodity):
                 if CUSIP_KEY in entry.meta:
                     commodities_by_cusip[entry.meta[CUSIP_KEY]] = entry.currency
@@ -1526,12 +1554,12 @@ class PrepareState(object):
 
         for matched in (matched_transactions, matched_cash_transactions,
                         matched_cash_transfer_transactions):
-            for full_fitid, transactions in matched.items():
-                logger.debug("full_fitid: %s" % (full_fitid_to_str(full_fitid)))
-                excess_number = len(transactions) - (full_fitid in source_fitids)
+            for transaction_key, transactions in matched.items():
+                logger.debug("transaction_key: %s" % (transaction_key_to_str(transaction_key)))
+                excess_number = len(transactions) - (transaction_key in source_transaction_keys)
                 if excess_number == 0: continue
                 transactions = prune_valid_duplicates(transactions)
-                excess_number = len(transactions) - (full_fitid in source_fitids)
+                excess_number = len(transactions) - (transaction_key in source_transaction_keys)
                 if excess_number == 0: continue
                 results.add_invalid_reference(
                     InvalidSourceReference(excess_number, transactions))
@@ -1549,7 +1577,7 @@ class OfxSource(Source):
         logger.debug(">OfxSource.__init__()")
         super().__init__(**kwargs)
         self.ofx_filenames = [os.path.realpath(x) for x in ofx_filenames]
-        self.source_fitids = set()  # type: Set[FullFitid]
+        self.source_transaction_keys = dict()  # type: Dict[TransactionKey, str]
         self.parsed_files = []  # type: List[ParsedOfxFile]
         cached_ofx_filenames = set()  # type: Set[str]
         if cache_filename is not None:
@@ -1565,7 +1593,7 @@ class OfxSource(Source):
                     if not cached_ofx_filenames.issubset(set(ofx_filenames)):
                         raise RuntimeError('filenames are not subset')
                     parsed_files = cache_data['parsed_files']
-                    self.source_fitids.update(cache_data['source_fitids'])
+                    self.source_transaction_keys.update(cache_data['source_transaction_keys'])
                     self.parsed_files.extend(parsed_files)
             except:
                 import traceback
@@ -1577,7 +1605,7 @@ class OfxSource(Source):
                 continue
             self.log_status('ofx: loading %s' % filename)
             self.parsed_files.append(
-                ParsedOfxFile(self.source_fitids,
+                ParsedOfxFile(self.source_transaction_keys,
                               filename,
                               checknum_numeric(filename),
                               check_balance(filename),
@@ -1586,7 +1614,7 @@ class OfxSource(Source):
         if cache_filename is not None:
             cache_data = {
                 'version': cache_version_number,
-                'source_fitids': self.source_fitids,
+                'source_transaction_keys': self.source_transaction_keys,
                 'parsed_files': self.parsed_files
             }
             with atomic_write(cache_filename, mode='wb', overwrite=True) as wcache_f:
@@ -1657,5 +1685,5 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('ofx_file')
     args = ap.parse_args()
-    source_fitids = set()  # type: Set[Any]
-    result = ParsedOfxFile(source_fitids, args.ofx_file)
+    source_transaction_keys = dict()  # type: Dict[TransactionKey, str]
+    result = ParsedOfxFile(source_transaction_keys, args.ofx_file)

@@ -61,6 +61,7 @@ expression like the following to specify the ofx source:
          checknum_numeric=lambda ofx_filename: False,
          check_balance=lambda ofx_filename: False,
          check_other_keys=lambda ofx_filename: ['total', 'checknum'],
+         fitid_regexp=lambda ofx_filename: r'[0-9A-E]+' if 'BanquePopulaire' in ofx_filename else None,
     )
 
 where `journal_dir` refers to the financial/ directory.
@@ -110,6 +111,11 @@ DTASOF.
 Check duplicates by looking at fields other than the fitid
 ----------------------------------------------------------
 The `check_other_keys` key is optional but can be used to ignore transactions that are a duplicate of another.
+
+Changing fitid into a fitid conforming to a regular expression
+--------------------------------------------------------------
+When there is a duplicate fitid for the same transaction (see above), the fitid matching the regular expression fitid_regexp wins.
+So it may be changed into another fitid. The original fitid will be stored as `ofx_fitid_orig` in the posting metadata.
 
 
 Specifying individual accounts
@@ -550,6 +556,7 @@ RawTransactionEntry = NamedTuple('RawTransactionEntry', [
     ('filename', str),
     ('date', datetime.date),
     ('fitid', str),
+    ('fitid_orig', Optional[str]),
     ('trantype', str),
     ('total', Decimal),
     ('incometype', Optional[str]),
@@ -656,6 +663,7 @@ def get_info(
 
 
 OFX_FITID_KEY = 'ofx_fitid'
+OFX_FITID_ORIG_KEY = 'ofx_fitid_orig'
 FITID_TRANSFER_PREFIX = '>'
 OFX_TYPE_KEY = 'ofx_type'
 OFX_TYPE_TRANSFER_KEY = 'ofx_type_transfer'
@@ -743,13 +751,16 @@ CHECK_BALANCE = False     # False is old behavior
 
 CHECK_OTHER_KEYS = []     # Empty is old behaviour
 
+FITID_REGEXP = None       # None is old behaviour
+
 
 class ParsedOfxStatement(object):
     def __init__(self, seen_transaction_keys, filename, securities_map, org, stmtrs,
                  checknum_numeric=CHECKNUM_NUMERIC,
                  check_balance=CHECK_BALANCE,
-                 check_other_keys: List[str] = CHECK_OTHER_KEYS):
-        logger.debug(">ParsedOfxStatement.__init__(filename=%s, checknum_numeric=%s, check_balance=%s, check_other_keys=%s)" % (filename, checknum_numeric, check_balance, check_other_keys))
+                 check_other_keys: List[str] = CHECK_OTHER_KEYS,
+                 fitid_regexp: Optional[str] = FITID_REGEXP):
+        logger.debug(">ParsedOfxStatement.__init__(filename=%s, checknum_numeric=%s, check_balance=%s, check_other_keys=%s, fitid_regexp=%s)" % (filename, checknum_numeric, check_balance, check_other_keys, fitid_regexp))
         filename = os.path.abspath(filename)
         self.filename = filename
         self.securities_map = securities_map
@@ -817,6 +828,7 @@ class ParsedOfxStatement(object):
                 raw = RawTransactionEntry(
                     trantype=trantype,
                     fitid=fitid,
+                    fitid_orig=None,
                     date=date,
                     total=total,
                     incometype=find_child(tran, 'incometype'),
@@ -840,14 +852,16 @@ class ParsedOfxStatement(object):
                     if transaction_key2 not in seen_transaction_keys:
                         logger.debug("transaction_key2 (%s) NOT seen yet" % (transaction_key_to_str(transaction_key2)))
                         seen_transaction_keys[transaction_key2] = fitid
-                    elif seen_transaction_keys[transaction_key2] != fitid and not(re.fullmatch(r'[0-9A-E]+', fitid)):
+                    elif fitid_regexp and \
+                         re.fullmatch(fitid_regexp, seen_transaction_keys[transaction_key2]) and \
+                         not(re.fullmatch(fitid_regexp, fitid)):
                         logger.warning("Transaction identified by (%s) will receive a new fitid (%s => %s)" %
                                        (transaction_key_to_str(transaction_key2), fitid, seen_transaction_keys[transaction_key2]))
-                        fitid = seen_transaction_keys[transaction_key2]
                         # make a copy but with a different fitid
                         raw = RawTransactionEntry(
                             trantype=raw.trantype,
-                            fitid=fitid,
+                            fitid=seen_transaction_keys[transaction_key2],
+                            fitid_orig=fitid,
                             date=raw.date,
                             total=raw.total,
                             incometype=raw.incometype,
@@ -863,6 +877,7 @@ class ParsedOfxStatement(object):
                             commission=raw.commission,
                             checknum=raw.checknum,
                             filename=raw.filename)
+                        fitid = raw.fitid
 
                 transaction_key = (account_ofx_id, date, fitid)
                 if transaction_key in seen_transaction_keys:
@@ -1047,6 +1062,9 @@ class ParsedOfxStatement(object):
 
             posting_meta = collections.OrderedDict(base_meta)
 
+            if raw.fitid_orig:
+                posting_meta[OFX_FITID_ORIG_KEY] = raw.fitid_orig
+            
             posting_meta[POSTING_DATE_KEY] = raw.date
             posting_meta[OFX_TYPE_KEY] = raw.trantype
 
@@ -1376,7 +1394,8 @@ class ParsedOfxFile(object):
     def __init__(self, seen_transaction_keys, filename,
                  checknum_numeric=CHECKNUM_NUMERIC,
                  check_balance=CHECK_BALANCE,
-                 check_other_keys=CHECK_OTHER_KEYS):
+                 check_other_keys=CHECK_OTHER_KEYS,
+                 fitid_regexp=FITID_REGEXP):
         logger.debug(">ParsedOfxFile.__init__(filename=%s)" % (filename))
         self.filename = filename
         parsed_statements = self.parsed_statements = []
@@ -1402,7 +1421,8 @@ class ParsedOfxFile(object):
                     stmtrs=stmtrs,
                     checknum_numeric=checknum_numeric,
                     check_balance=check_balance,
-                    check_other_keys=check_other_keys))
+                    check_other_keys=check_other_keys,
+                    fitid_regexp=fitid_regexp))
         logger.debug("<ParsedOfxFile.__init__(filename=%s)" % (filename))
 
 
@@ -1573,6 +1593,7 @@ class OfxSource(Source):
                  checknum_numeric: Callable[[str], bool] = lambda ofx_filename: CHECKNUM_NUMERIC,
                  check_balance: Callable[[str], bool] = lambda ofx_filename: CHECK_BALANCE,
                  check_other_keys: Callable[[str], List] = lambda ofx_filename: CHECK_OTHER_KEYS,
+                 fitid_regexp: Callable[[str], Optional[str]] = lambda ofx_filename: FITID_REGEXP,
                  **kwargs) -> None:
         logger.debug(">OfxSource.__init__()")
         super().__init__(**kwargs)
@@ -1609,7 +1630,8 @@ class OfxSource(Source):
                               filename,
                               checknum_numeric(filename),
                               check_balance(filename),
-                              check_other_keys(filename)))
+                              check_other_keys(filename),
+                              fitid_regexp(filename)))
 
         if cache_filename is not None:
             cache_data = {
@@ -1654,7 +1676,7 @@ class OfxSource(Source):
 
 
 def load(spec, log_status):
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     return OfxSource(log_status=log_status, **spec)
 
 def convert2ofx(input_file_type: str,

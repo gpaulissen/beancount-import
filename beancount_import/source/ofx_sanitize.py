@@ -62,6 +62,15 @@ def get_balanced_tags(contents: str, tag_pattern=r'[a-zA-Z][a-zA-Z0-9]*'):
 def replace_number(x: str) -> str:
     if not x.strip():
         return x
+    # GJP: In Europe (France for instance) the decimal separator may be the comma: switch to English (dot)
+    pos_comma = x.find(',')  # -1 is not found
+    pos_dot = x.find('.')
+    if pos_comma > pos_dot:
+        # there is a comma
+        # and maybe a dot but then before the comma
+        if pos_dot >= 0:
+            x = x.replace('.', '')  # remove thousands separators
+        x = x.replace(',', '.')
     m = re.match(r'^(\s*[-+]?\s*)([0-9]+)((?:\.(?:[0-9]*[1-9])?)?)(0*\s*)$', x)
     assert m is not None
     num_part = str(random.randint(0, 99))
